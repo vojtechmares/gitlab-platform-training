@@ -1,0 +1,15 @@
+%{ if acme_email != "" ~}
+{
+	email ${acme_email}
+}
+
+%{ endif ~}
+${gitlab_fqdn} {
+	encode zstd gzip
+	reverse_proxy gitlab:80
+}
+
+${registry_fqdn} {
+	# Image layers can be large; Caddy has no request size limit by default.
+	reverse_proxy gitlab:5050
+}

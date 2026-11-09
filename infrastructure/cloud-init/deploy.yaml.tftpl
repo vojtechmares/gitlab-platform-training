@@ -1,0 +1,53 @@
+#cloud-config
+# Deploy host: a plain Docker host that pipelines deploy to over SSH. Rendered by Terraform.
+# Follow progress after boot:  tail -f /var/log/training-provision.log
+
+package_update: true
+package_upgrade: false
+packages:
+  - curl
+  - ca-certificates
+
+ssh_pwauth: false
+
+users:
+  - default
+  # The account the pipelines log in as. Key-only; added to the docker group by provision.sh.
+  - name: deploy
+    gecos: Pipeline deploy user
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${deploy_public_key}
+
+write_files:
+  - path: /etc/training/env
+    permissions: "0600"
+    content: |
+      SSH_PORT=${ssh_port}
+
+  - path: /etc/ssh/sshd_config.d/10-training.conf
+    permissions: "0644"
+    content: |
+      Port ${ssh_port}
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+
+  - path: /usr/local/sbin/training-move-sshd
+    permissions: "0755"
+    content: |
+      ${indent(6, script_move_sshd)}
+
+  - path: /usr/local/sbin/training-install-docker
+    permissions: "0755"
+    content: |
+      ${indent(6, script_install_docker)}
+
+  - path: /usr/local/sbin/training-deploy-provision
+    permissions: "0755"
+    content: |
+      ${indent(6, script_provision)}
+
+runcmd:
+  - [/usr/local/sbin/training-deploy-provision]

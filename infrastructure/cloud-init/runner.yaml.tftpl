@@ -1,0 +1,74 @@
+#cloud-config
+# Runner VM: Docker Engine + GitLab Runner (docker executor). Rendered by Terraform.
+# Follow progress after boot:  tail -f /var/log/training-provision.log
+
+package_update: true
+package_upgrade: false
+packages:
+  - curl
+  - jq
+  - gnupg
+  - ca-certificates
+
+ssh_pwauth: false
+
+write_files:
+  - path: /etc/training/env
+    permissions: "0600"
+    content: |
+      SSH_PORT=${ssh_port}
+      GITLAB_URL=${gitlab_url}
+      BOOTSTRAP_TOKEN=${bootstrap_token}
+      RUNNER_NAME=${runner_name}
+      RUNNER_TAGS=${runner_tags}
+      RUNNER_CONCURRENT=${runner_concurrent}
+
+  - path: /etc/ssh/sshd_config.d/10-training.conf
+    permissions: "0644"
+    content: |
+      Port ${ssh_port}
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin prohibit-password
+
+  - path: /usr/local/sbin/training-move-sshd
+    permissions: "0755"
+    content: |
+      ${indent(6, script_move_sshd)}
+
+  - path: /usr/local/sbin/training-install-docker
+    permissions: "0755"
+    content: |
+      ${indent(6, script_install_docker)}
+
+  - path: /usr/local/sbin/training-runner-provision
+    permissions: "0755"
+    content: |
+      ${indent(6, script_provision)}
+
+  - path: /usr/local/sbin/training-runner-bootstrap
+    permissions: "0755"
+    content: |
+      ${indent(6, script_bootstrap)}
+
+  - path: /etc/systemd/system/training-runner-bootstrap.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Create and register the GitLab instance runner
+      Wants=network-online.target
+      After=network-online.target docker.service gitlab-runner.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/training-runner-bootstrap
+      Restart=on-failure
+      RestartSec=60
+      TimeoutStartSec=7200
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - [/usr/local/sbin/training-runner-provision]

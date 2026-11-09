@@ -1,0 +1,39 @@
+[Unit]
+Description=GitLab (Omnibus) in a Podman container
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=${image}
+ContainerName=gitlab
+HostName=${gitlab_fqdn}
+Network=gitlab.network
+
+# Port 22 belongs to GitLab (Git over SSH). The host's own sshd was moved away from it.
+# 80/443 are published by Caddy, not by GitLab.
+PublishPort=22:22
+
+Volume=/srv/gitlab/config:/etc/gitlab
+Volume=/srv/gitlab/logs:/var/log/gitlab
+Volume=/srv/gitlab/data:/var/opt/gitlab
+
+# Recommended by GitLab for the container (Puma and shared memory).
+PodmanArgs=--shm-size=256m
+
+# The first start runs database migrations and can take 5-10 minutes.
+HealthCmd=/opt/gitlab/bin/gitlab-healthcheck --fail --max-time 10
+HealthInterval=60s
+HealthTimeout=30s
+HealthRetries=5
+HealthStartPeriod=15m
+
+# Deliberately no AutoUpdate=: GitLab upgrades must follow the required upgrade stops.
+
+[Service]
+Restart=always
+# Pulling the ~3 GB image and the first start both take a while; stopping must let GitLab flush.
+TimeoutStartSec=1800
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target
