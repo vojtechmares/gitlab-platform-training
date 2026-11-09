@@ -1,0 +1,27 @@
+# Chapter 7, stretch - a test matrix and a child pipeline.
+# The child pipeline file is the second document: save it as ci/child.yml.
+
+stages:
+  - test
+
+# One job definition, three jobs: one per Python version.
+unit-tests-matrix:
+  stage: test
+  tags:
+    - docker
+  image: python:$PYTHON_VERSION-slim
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.11", "3.12", "3.13"]
+  script:
+    - python --version
+    - pip install --quiet -r requirements-dev.txt
+    - pytest
+
+# A child pipeline runs a separate pipeline file as part of this one.
+# "strategy: depend" makes this job wait for the child and take over its result.
+child:
+  stage: test
+  trigger:
+    include: ci/child.yml
+    strategy: depend

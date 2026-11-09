@@ -1,0 +1,28 @@
+# Sample CODEOWNERS for the training project (GitLab Premium or Ultimate).
+# Copy to .gitlab/CODEOWNERS and replace the @training/... groups with groups that exist in YOUR project.
+#
+# Rules of this file:
+#  - GitLab uses the FIRST of ./CODEOWNERS, ./docs/CODEOWNERS, ./.gitlab/CODEOWNERS that exists.
+#  - Inline comments are NOT supported: keep every comment on its own line, never after an owner.
+#  - Per section, the LAST matching entry wins. A file that matches in several sections needs approval from each.
+#  - A file that no entry matches needs NO code owner approval, so keep a "*" default.
+#  - Owners must be direct members (of the project, its group or a parent group) with at least the Developer role.
+
+# Default section: every file needs a review from the whole team.
+* @training/developers
+
+[Pipeline and deployment][1] @training/platform
+.gitlab-ci.yml
+/.gitlab/
+/ci/
+Dockerfile
+/deploy/
+
+# The ownership rules are protected by the same mechanism, and need a second pair of eyes.
+[Ownership and access][2] @training/security @training/platform
+/.gitlab/CODEOWNERS
+
+# Documentation is nice to have reviewed but does not block a merge.
+^[Documentation] @training/developers
+/docs/
+README.md

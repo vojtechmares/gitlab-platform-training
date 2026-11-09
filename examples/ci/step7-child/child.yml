@@ -1,0 +1,8 @@
+# Save as ci/child.yml next to the pipeline file from step7-matrix-and-child.yml.
+child-job:
+  image: alpine:3.22
+  tags:
+    - docker
+  script:
+    - echo "I am the child pipeline"
+    - 'echo "Pipeline source: $CI_PIPELINE_SOURCE"' # quoted: an unquoted ": " would turn this line into a mapping

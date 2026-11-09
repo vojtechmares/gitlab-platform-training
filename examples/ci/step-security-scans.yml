@@ -1,0 +1,15 @@
+# Chapter 5 - turn on security scanning with two lines of YAML.
+# Save as .gitlab-ci.yml on a branch, push, and open a merge request.
+#
+# Both templates ship with GitLab. The scanners run in the "test" stage of your pipeline.
+# SAST and secret detection are available in every tier; seeing the results inside the merge
+# request and in the vulnerability report needs Ultimate.
+
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+variables:
+  # Without this, the scanners run in branch pipelines only and a merge request pipeline
+  # (which is what you normally want for review) would show no scan results.
+  AST_ENABLE_MR_PIPELINES: "true"

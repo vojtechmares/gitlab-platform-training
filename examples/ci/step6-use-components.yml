@@ -1,0 +1,10 @@
+# Chapter 7, part 2 - the same lint and test jobs, from a shared component.
+#
+# The whole pipeline is these lines. The jobs "lint" and "unit-tests" come from
+# training/ci-components, version 1.0.0. Open templates/python-checks.yml in that project
+# to see exactly what you are including: you run it with your project's credentials.
+
+include:
+  - component: $CI_SERVER_FQDN/training/ci-components/python-checks@1.0.0
+    inputs:
+      python_version: "3.13"

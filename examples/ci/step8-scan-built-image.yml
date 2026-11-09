@@ -1,0 +1,85 @@
+# Chapter 8 - scan the image you just built, then gate on the result.
+# Container scanning in pipelines is Free; scanning images in the registry and showing the findings in
+# the merge request and the vulnerability report is Ultimate.
+#
+# Needs the same runner and registry as the build and deploy pipeline of Chapter 7.
+# NOT run on a live instance while preparing the course; it is checked against GitLab's CI schema only.
+#
+# Order matters: the scan template puts its job in the "test" stage, which runs BEFORE the image exists.
+# So this file moves the job to its own "scan" stage and makes it wait for the build.
+
+include:
+  - template: Jobs/Container-Scanning.gitlab-ci.yml
+
+stages:
+  - build
+  - scan
+  - gate
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE
+  # The image to scan: the one this pipeline pushed, identified by the commit.
+  CS_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  GATE_FAIL_ON: "Critical"
+
+build-image:
+  stage: build
+  image: docker:29
+  tags:
+    - docker
+  services:
+    - docker:29-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+    # Docker 29 adds provenance attestation manifests to every image it builds. The GitLab 19.5 Container Registry
+    # (metadata database mode) rejects that push with "blob unknown to registry", so switch the attestations off.
+    BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --pull -t "$IMAGE:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$IMAGE:$CI_COMMIT_SHORT_SHA"
+
+container_scanning:
+  stage: scan
+  tags:
+    - docker
+  needs:
+    - build-image
+  variables:
+    # Credentials of this job; the project's registry is private.
+    CS_REGISTRY_USER: $CI_REGISTRY_USER
+    CS_REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+  # build-image exists only on the default branch, so the scan must be limited the same way.
+  # (Replacing "rules" drops the template's merge request logic, which is what we want here.)
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+image-gate:
+  stage: gate
+  image: alpine:3.22
+  tags:
+    - docker
+  needs:
+    - job: container_scanning
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - apk add --no-cache jq
+    - |
+      report=gl-container-scanning-report.json
+      [ -f "$report" ] || { echo "$report is missing: the scan did not produce a report"; exit 1; }
+      filter='(.vulnerabilities // [])[] | select(.severity | IN(($levels | split(" "))[]))'
+      count=$(jq --arg levels "$GATE_FAIL_ON" "[ $filter ] | length" "$report")
+      jq -r --arg levels "$GATE_FAIL_ON" "$filter | \"  [\(.severity)] \(.name) (\(.location.dependency.package.name // \"-\"))\"" "$report"
+      if [ "$count" -gt 0 ]; then
+        echo "Gate failed: $count finding(s) at level: $GATE_FAIL_ON"
+        exit 1
+      fi
+      echo "Gate passed"

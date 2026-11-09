@@ -1,0 +1,70 @@
+# Chapter 7, part 1 - control when jobs run, and let jobs start early with needs.
+
+stages:
+  - test
+  - build
+  - deploy
+
+# Without workflow:rules you get duplicate pipelines (branch + merge request).
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+default:
+  image: python:3.13-slim
+  tags:
+    - docker
+
+lint:
+  stage: test
+  script:
+    - pip install --quiet ruff
+    - ruff check .
+
+unit-tests:
+  stage: test
+  script:
+    - pip install --quiet -r requirements-dev.txt
+    - pytest
+
+docs-check:
+  stage: test
+  image: alpine:3.22
+  script:
+    - test -f README.md
+  rules:
+    # Only when documentation changed (or when a human starts the pipeline).
+    - changes:
+        - README.md
+        - docs/**/*
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+package:
+  stage: build
+  needs: # starts as soon as unit-tests is done, does not wait for lint or docs-check
+    - unit-tests
+  script:
+    - echo "building package for $CI_COMMIT_SHORT_SHA"
+    - mkdir -p dist && echo "$CI_COMMIT_SHA" > dist/BUILD_INFO
+  artifacts:
+    paths:
+      - dist/
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+release-notes:
+  stage: deploy
+  image: alpine:3.22
+  needs:
+    - job: package
+      artifacts: true # download dist/ from the package job
+  script:
+    - cat dist/BUILD_INFO
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true # a skipped manual job does not block the pipeline

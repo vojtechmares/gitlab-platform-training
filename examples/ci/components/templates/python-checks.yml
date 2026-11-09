@@ -1,0 +1,49 @@
+spec:
+  inputs:
+    stage:
+      description: Stage the jobs run in
+      default: test
+    python_version:
+      description: Python minor version used for the job image
+      default: "3.13"
+      options:
+        - "3.11"
+        - "3.12"
+        - "3.13"
+    requirements:
+      description: Requirements file with test and lint dependencies
+      default: requirements-dev.txt
+    runner_tag:
+      description: Runner tag to select
+      default: docker
+---
+.python-checks-base:
+  image: python:$[[ inputs.python_version ]]-slim
+  stage: $[[ inputs.stage ]]
+  tags:
+    - $[[ inputs.runner_tag ]]
+  variables:
+    PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  cache:
+    key:
+      files:
+        - $[[ inputs.requirements ]]
+    paths:
+      - .cache/pip
+
+lint:
+  extends: .python-checks-base
+  script:
+    - pip install --quiet ruff
+    - ruff check .
+
+unit-tests:
+  extends: .python-checks-base
+  script:
+    - pip install --quiet -r $[[ inputs.requirements ]]
+    - pytest --junitxml=report.xml
+  artifacts:
+    when: always
+    expire_in: 1 week
+    reports:
+      junit: report.xml

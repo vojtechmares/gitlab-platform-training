@@ -1,0 +1,16 @@
+# Chapter 6, step 1 - the smallest useful pipeline.
+# Copy to .gitlab-ci.yml in your project, commit, and watch CI/CD > Pipelines.
+
+stages:
+  - test
+
+hello:
+  stage: test
+  image: alpine:3.22
+  tags:
+    - docker
+  script:
+    - echo "Hello from runner $CI_RUNNER_DESCRIPTION (job $CI_JOB_ID)"
+    - cat /etc/os-release
+    - echo "--- predefined variables ---"
+    - env | sort | grep '^CI_' | head -40

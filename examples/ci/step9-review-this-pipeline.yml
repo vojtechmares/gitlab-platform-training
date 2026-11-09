@@ -1,0 +1,46 @@
+# EXERCISE (Chapter 8): your supplier handed you this pipeline. Do NOT run it.
+# Read it as a reviewer. Write down everything you would not accept in your project, and why.
+# There are at least a dozen findings. Use the pipeline review checklist.
+
+include:
+  - remote: https://ci-templates.example.net/deploy.yml
+  - template: Jobs/SAST.gitlab-ci.yml
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  CI_DEBUG_TRACE: "true"
+  SAST_DISABLED: "true"
+  DB_PASSWORD: "Pr0d-Passw0rd!"
+  IMAGE: $CI_REGISTRY_IMAGE:latest
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - curl -sSL https://get.example.net/install.sh | sh
+  script:
+    - echo "DB_PASSWORD=$DB_PASSWORD" > .env
+    - docker build -t $IMAGE .
+    - docker push $IMAGE
+  artifacts:
+    paths:
+      - .env
+    expire_in: never
+
+deploy-prod:
+  stage: deploy
+  image: alpine
+  script:
+    - apk add openssh-client
+    - echo "$SSH_PRIVATE_KEY" > key && chmod 600 key
+    - ssh -i key -o StrictHostKeyChecking=no deploy@prod.example.net "docker pull $IMAGE && docker run -d -e DB_PASSWORD=$DB_PASSWORD $IMAGE"
+    - echo "Deployed $IMAGE with the password $DB_PASSWORD"
+  rules:
+    - if: $CI_COMMIT_BRANCH
+      when: manual

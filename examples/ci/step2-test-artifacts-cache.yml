@@ -1,0 +1,42 @@
+# Chapter 6, step 2 - lint and test with artifacts and a dependency cache.
+# Then break a test on purpose and read the failed job log.
+
+stages:
+  - test
+
+default:
+  image: python:3.13-slim
+  tags:
+    - docker
+
+variables:
+  PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+
+lint:
+  stage: test
+  cache:
+    key:
+      files:
+        - requirements-dev.txt
+    paths:
+      - .cache/pip
+  script:
+    - pip install --quiet ruff
+    - ruff check .
+
+unit-tests:
+  stage: test
+  cache:
+    key:
+      files:
+        - requirements-dev.txt
+    paths:
+      - .cache/pip
+  script:
+    - pip install --quiet -r requirements-dev.txt
+    - pytest --junitxml=report.xml
+  artifacts:
+    when: always # keep the report even when tests fail
+    expire_in: 1 week
+    reports:
+      junit: report.xml # shows up in the merge request test widget

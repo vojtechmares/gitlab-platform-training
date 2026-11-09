@@ -1,0 +1,73 @@
+# Chapter 8 - scanners that can FAIL the pipeline. Everything in this file works in the Free tier.
+# Copy to .gitlab-ci.yml on a branch and open a merge request.
+#
+# What GitLab's templates do by default: they run the scanners, keep the JSON report as a job artifact,
+# and are "allow_failure: true". A green pipeline therefore says nothing about findings.
+# This file adds one job of your own - the gate - that reads the reports and fails on severe findings.
+#
+# Free tier : the scanners run, the gate works.
+# Ultimate  : GitLab also shows the findings in the merge request and the vulnerability report, and a
+#             merge request approval policy can enforce the decision outside this repository.
+#
+# Why the gate job is only half a control: whoever can edit this file can remove the gate.
+# Protect .gitlab-ci.yml with a protected branch, required approvals and a code owner (Chapter 4).
+
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+stages:
+  - test
+  - gate
+
+variables:
+  # Run the scanners in merge request pipelines too (the templates default to branch pipelines).
+  AST_ENABLE_MR_PIPELINES: "true"
+  # Severities that fail the gate. Possible values: Critical High Medium Low Info Unknown
+  GATE_FAIL_ON: "Critical High"
+
+security-gate:
+  stage: gate
+  image: alpine:3.22
+  tags:
+    - docker
+  # The scanners create their jobs only when they have something to scan, so every need is optional.
+  # With GitLab Advanced SAST (Ultimate, GITLAB_ADVANCED_SAST_ENABLED) the SAST report comes from gitlab-advanced-sast.
+  # Limit: if both SAST analyzers run in one pipeline they write the SAME file name (gl-sast-report.json), so only one
+  # report reaches this job. For full coverage use one gate job per scanner job.
+  needs:
+    - job: semgrep-sast
+      artifacts: true
+      optional: true
+    - job: gitlab-advanced-sast
+      artifacts: true
+      optional: true
+    - job: secret_detection
+      artifacts: true
+      optional: true
+  # Same logic as the scanner templates: one pipeline per change.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+  script:
+    - apk add --no-cache jq
+    - |
+      blocked=0
+      for report in gl-sast-report.json gl-secret-detection-report.json; do
+        if [ ! -f "$report" ]; then
+          echo "$report: not found (the scanner did not run in this pipeline)"
+          continue
+        fi
+        filter='(.vulnerabilities // [])[] | select(.severity | IN(($levels | split(" "))[]))'
+        count=$(jq --arg levels "$GATE_FAIL_ON" "[ $filter ] | length" "$report")
+        echo "$report: $count finding(s) at level: $GATE_FAIL_ON"
+        jq -r --arg levels "$GATE_FAIL_ON" "$filter | \"  [\(.severity)] \(.name) (\(.location.file // \"-\"))\"" "$report"
+        blocked=$((blocked + count))
+      done
+      if [ "$blocked" -gt 0 ]; then
+        echo "Gate failed: $blocked blocking finding(s). Fix them, or ask the security owner to triage."
+        exit 1
+      fi
+      echo "Gate passed"

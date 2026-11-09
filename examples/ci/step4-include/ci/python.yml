@@ -1,0 +1,21 @@
+# Hidden jobs (leading dot) never run on their own.
+
+# Settings shared by every Python job, pulled in with "extends".
+.python-job:
+  image: python:3.13-slim
+  tags:
+    - docker
+  variables:
+    PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
+  cache:
+    key:
+      files:
+        - requirements-dev.txt
+    paths:
+      - .cache/pip
+
+# A script fragment, pulled in with "!reference". It is deliberately NOT extended:
+# "extends" would merge it into the job, "!reference" copies just the part you name.
+.python-setup:
+  script:
+    - pip install --quiet -r requirements-dev.txt

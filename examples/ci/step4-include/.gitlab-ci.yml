@@ -1,0 +1,22 @@
+# Chapter 6, step 2 - split the pipeline into reusable parts.
+# Copy this file AND the ci/ directory into your project.
+
+include:
+  - local: ci/python.yml
+
+stages:
+  - test
+
+lint:
+  extends: .python-job # inherit image, tags, cache, variables
+  stage: test
+  script:
+    - pip install --quiet ruff
+    - ruff check .
+
+unit-tests:
+  extends: .python-job
+  stage: test
+  script:
+    - !reference [.python-setup, script] # reuse only the script lines of another job
+    - pytest
