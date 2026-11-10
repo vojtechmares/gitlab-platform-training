@@ -189,7 +189,9 @@ already exists. If the domain has CAA records, they must allow `letsencrypt.org`
 - **Backups.** `podman exec gitlab gitlab-backup create` writes to `/srv/gitlab/data/backups/`;
   `podman exec gitlab gitlab-ctl backup-etc` writes `gitlab.rb`, `gitlab-secrets.json` and the SSH host
   keys to `/srv/gitlab/config/config_backup/`. The first does **not** contain the second. Copy both
-  off the VM.
+  off the VM. The registry runs on its metadata database, and the first archive holds the registry
+  files but **no dump of that database** (no backup credentials are set): see Chapter 10 of the
+  main README, and add a `pg_dump` of the `registry` database until you have tested the credentials.
 - **Lock down SSH** for anything long-lived: `admin_cidrs = ["<your ip>/32"]`.
 - **Memory.** `cx43` matches GitLab's single-node baseline. On `cx33` (8 GB) lower
   `gitlab_puma_workers` to 2 and `gitlab_sidekiq_concurrency` to 10.
