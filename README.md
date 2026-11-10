@@ -17,7 +17,7 @@
 
 A two-day, hands-on course for people who **use GitLab**: Git properly, GitLab itself, working as a team (merge requests, **CODEOWNERS**, and how it all becomes audit evidence for **SOC 2 Type II**), registries and security scanning, CI/CD with practical examples, and practical security guides. A ninth chapter is for the people who **own the platform**: locking down the instance, user management, required approvals at scale, and reporting.
 
-**Audience:** developers, team leads, QA and DevOps engineers with a little Git experience (clone, commit, push). Chapter 9 adds administrators, security and compliance.
+**Audience:** developers, team leads, QA and DevOps engineers with a little Git experience (clone, commit, push). Chapters 9 and 10 add administrators, security, compliance and operations.
 
 **Every GitLab feature is marked with the tier it needs**, and the claims are checked against the documentation of **GitLab 19.5**:
 
@@ -39,6 +39,7 @@ Each section links to the official documentation as `[Docs](...)`. The links poi
 | [7](#chapter-7-ci-in-practice) | CI in practice: rules, reuse, build and deploy | 2 |
 | [8](#chapter-8-security-in-practice) | Security in practice: secrets, hardening, scanners | 2 |
 | [9](#chapter-9-governance-for-platform-owners) | Governance for platform owners: instance, identity, approvals at scale, reporting | extra |
+| [10](#chapter-10-operating-gitlab-and-the-container-registry) | Operating GitLab and the container registry: backup, restore, upgrade, monitoring, registry | extra |
 | [A-D](#appendix-a-git-cheat-sheet) | Cheat sheets, tier reference, pipeline review checklist | - |
 
 The CI examples referenced in the chapters live in [`examples/`](examples/): pipelines in [`examples/ci/`](examples/ci/) (one file per step, plus [components](examples/ci/components/)), the Git practice scenarios in [`examples/git-exercises/`](examples/git-exercises/), a sample [`CODEOWNERS`](examples/codeowners/CODEOWNERS) and the sample application in [`examples/hello-app/`](examples/hello-app/).
@@ -58,11 +59,11 @@ Two days, 09:00 to 17:00, in 90-minute blocks, each followed by a break and endi
 | 15:00 - 16:30 | Chapter 4: Team collaboration, CODEOWNERS, audit | Chapter 8: Security in practice |
 | 16:30 - 17:00 | Recap, questions | Recap, questions |
 
-**Governance (Chapter 9) does not fit into those two days.** Choose one:
+**Governance (Chapter 9) and operations (Chapter 10) do not fit into those two days.** Choose one:
 
-1. **A third half-day** (90 to 120 minutes) for platform owners, security and compliance, on its own date
+1. **A third half-day** (90 to 120 minutes per chapter) for platform owners, security and compliance (Chapter 9) and for the people who run the server (Chapter 10), on their own dates
 2. **The 8-hour variant**: if "2 x 8 hours" means eight *net* hours, add one 90-minute block per day. On Day 2, run Chapter 9 in place of the optional CI clinic; on Day 1 keep the workshop on the team's real working agreement and CODEOWNERS
-3. **Callouts only**: for a developers-only group skip Chapter 9 and read only the **For owners and admins** notes in Chapters 1 to 8
+3. **Callouts only**: for a developers-only group skip Chapters 9 and 10 and read only the **For owners and admins** notes in Chapters 1 to 8
 
 If time runs short, cut in this order: push rules and signed commits (Chapter 4, show only), `bisect` and `cherry-pick` (Chapter 2), Dependency Proxy, packages and releases (Chapter 5), `matrix` and `needs` (Chapter 7), steps 7 and 8 of the Chapter 3 and 4 hands-on (the trainer shows them). **Never cut**: the Git rescue hands-on, the permission matrix, "prove the gate", the first pipeline, the deploy, and the review of an inherited pipeline.
 
@@ -2743,6 +2744,285 @@ About 60 to 90 minutes, as a workshop around one instance (the trainer's, or the
 
 ---
 
+## Chapter 10: Operating GitLab and the container registry
+
+Backups, restores, upgrades, monitoring and the container registry of a **self-managed** instance. This chapter is for the people who **run the server**: platform owners, administrators and the on-call engineer. It builds on Chapter 5 (registries) and Chapter 9 (governance). On GitLab.com and Dedicated, GitLab operates the platform and most of this is not your job.
+
+Plan about 90 to 120 minutes. Like Chapter 9 it does not fit into the two 6-hour days: run it as a separate session for the operators (see [the agenda](#agenda)).
+
+> [!IMPORTANT]
+> The commands are for a **Linux package** installation and for its **container image** (inside a container, prefix them with `docker exec -it <container>`; on the lab it is `podman exec gitlab`). Every setting and limit was read from the GitLab **19.5** documentation. Items marked **Observed on the lab** were run on the course instance (19.5.3-ee, one VM, Podman, registry on local disk). A **restore** and an **upgrade** were *not* run there: those sections are documentation-checked, so rehearse them on a spare instance before you depend on them.
+
+### What you are running
+
+[Docs: what a backup contains](https://docs.gitlab.com/19.5/administration/backup_restore/backup_gitlab/)
+
+A single-node instance is a set of cooperating services. The lab lists 16 under `gitlab-ctl status`, among them `puma` (web and API), `sidekiq` (background jobs), `gitaly` (Git repositories), `postgresql`, `redis`, `registry`, `gitlab-workhorse`, `nginx`, `prometheus` and `gitlab-kas`.
+
+What matters for operations is **where the state is, and whether the backup covers it**:
+
+| State | Lives in | In `gitlab-backup`? |
+| --- | --- | --- |
+| Users, projects, issues, merge requests, settings, encrypted values | PostgreSQL, main database | Yes |
+| Git repositories, wikis, snippets | Gitaly | Yes |
+| Uploads, job artifacts and logs, LFS, packages, Pages, Terraform states, secure files | Disk, or object storage | Yes on local disk. **Object storage is not included** |
+| Container registry images | Disk, or object storage | Yes on local disk. **Object storage is not included** |
+| Container registry metadata | PostgreSQL, database `registry` | **Only when backup credentials are configured** ([see below](#the-registry-database-and-backups)) |
+| Redis (cache, Sidekiq jobs) | Redis | **No** |
+| Configuration and secrets: `gitlab.rb`, `gitlab-secrets.json` | `/etc/gitlab` | **No** |
+| TLS and SSH keys and certificates, global server hooks, file hooks | The host | **No** |
+
+Every **No** is a second backup job that you own. The secrets file matters most: it holds the keys for encrypted values in the database, so a database backup without it restores data that nobody can decrypt.
+
+### Everyday checks 🟢 Free
+
+[Docs: health checks](https://docs.gitlab.com/19.5/administration/monitoring/health_check/) · [Logs](https://docs.gitlab.com/19.5/administration/logs/) · [Prometheus](https://docs.gitlab.com/19.5/administration/monitoring/prometheus/)
+
+```shell
+sudo gitlab-ctl status                       # every service should say "run:"
+sudo gitlab-rake gitlab:check SANITIZE=true  # configuration, Gitaly, Sidekiq, database, storage
+sudo gitlab-rake gitlab:env:info             # versions of GitLab, Ruby, PostgreSQL, Redis, and the URLs
+sudo gitlab-rake gitlab:doctor:secrets       # can the stored encrypted values still be decrypted?
+sudo gitlab-ctl tail registry                # follow one service's log; without a name, all of them
+```
+
+**Observed on the lab:** `gitlab:check`, `gitlab:env:info` and `gitlab:doctor:secrets` ran clean on 19.5.3-ee (`doctor:secrets` checked 150 models and reported 0 failures in each). `gitlab:check` skips the systemd and Elasticsearch checks, as expected on a Linux package without Advanced Search.
+
+Three health endpoints answer without a login, **but only to clients on an allowlist** (by default the server itself, see [the allowlist](https://docs.gitlab.com/19.5/administration/monitoring/ip_allowlist/)):
+
+| Endpoint | What it tells you |
+| --- | --- |
+| `/-/health` | The application server is running (`GitLab OK`). It does **not** check the database or other services |
+| `/-/liveness` | The process is alive |
+| `/-/readiness?all=1` | The instance accepts traffic. With `all=1` it also validates the database, Redis, Gitaly and others, and reports each |
+
+**Observed on the lab:** from inside the container `/-/health`, `/-/liveness` and `/-/readiness` all answered 200; the same three paths on the public hostname answered 404. Add your monitoring host's IP to the allowlist rather than exposing them.
+
+The log files you will open first, under `/var/log/gitlab/`:
+
+| File | Content |
+| --- | --- |
+| `gitlab-rails/production_json.log` | Requests handled by the Rails application, as JSON |
+| `gitlab-rails/api_json.log` | API requests |
+| `gitlab-rails/audit_json.log` | Audit events, the file to forward to your SIEM (Chapter 9) |
+| `sidekiq/current` | Background jobs |
+| `gitaly/current` | Git storage |
+| `nginx/gitlab_access.log` | Requests that reached the bundled NGINX |
+| `registry/current` | The container registry |
+
+**Prometheus is on by default** and, by default, reachable from the server itself on `localhost:9090`; `prometheus_monitoring['enable'] = false` turns it off. What to alert on is your decision. A reasonable start (a suggestion, not a GitLab requirement):
+
+| Watch | Why |
+| --- | --- |
+| Free space on the data volume and on the backup location | A full disk stops Git, the database and the registry |
+| Age and size of the newest good backup | A backup job that silently stopped is found on the day you need it |
+| `/-/readiness?all=1` from your monitoring host | Database, Redis and Gitaly in one probe |
+| Runners online and the time jobs wait | Developers notice this first |
+| TLS certificate expiry | The registry and Git over HTTPS fail together |
+| Registry online garbage collection queues (`gc-stats`, below) | A growing queue means storage is not being reclaimed |
+
+### Backups 🟢 Free
+
+[Docs: backup](https://docs.gitlab.com/19.5/administration/backup_restore/backup_gitlab/) · [Archive process](https://docs.gitlab.com/19.5/administration/backup_restore/backup_archive_process/)
+
+```shell
+sudo gitlab-backup create                     # the GitLab data, as one tar archive
+sudo gitlab-ctl backup-etc                    # the configuration, as a separate tar archive
+docker exec -t <container> gitlab-backup create   # the same, for a container installation
+```
+
+- The archive is written to `/var/opt/gitlab/backups` by default (`gitlab_rails['backup_path']`) and is named `<timestamp>_<date>_<version>_gitlab_backup.tar`. The **version in the name is a requirement**: a restore needs exactly that version
+- `gitlab-backup` does **not** store `gitlab.rb` and `gitlab-secrets.json` (GitLab prints a warning), and `gitlab-ctl backup-etc` stores them separately; on the lab that archive also held the SSH host keys. **Keep the two archives in different places**: the secrets file holds the key to the encrypted values in the database, and it can change after an upgrade, so keep the newest copy
+- `SKIP=` leaves parts out, for example `sudo gitlab-backup create SKIP=db,uploads`. It takes `db`, `repositories`, `uploads`, `artifacts`, `pages`, `lfs`, `terraform_state`, `registry`, `packages`, `ci_secure_files`, `agent_plan_content`, `ci_catalog_bundles` and `external_diffs`. Use `SKIP=registry` only when the registry is on object storage that you back up another way
+- `STRATEGY=copy` copies the data before archiving, which avoids the "file changed as we read it" failure on a busy instance at the price of up to one extra copy of disk space. `INCREMENTAL=yes` makes repository backups incremental, for instances where the full run gets too long
+- **Retention** is local only: `gitlab_rails['backup_keep_time'] = 604800` (seconds, 7 days) prunes older archives on the next backup. GitLab does not prune a bucket you copy them to
+- **Object storage is yours to back up**, with the provider's versioning or replication. Redis is not backed up, and with it go the queued Sidekiq jobs
+
+**Observed on the lab:** `gitlab-backup create` produced a 52 MB archive (`installation_type: gitlab-docker`) with `db/database.sql.gz` and `registry.tar.gz`, and `gitlab-ctl backup-etc` a separate config archive. The archive held **no** `gitlab.rb` and **no** `gitlab-secrets.json`, as the warning said. Look inside every new kind of backup once with `tar -tf <archive>`: that is how the registry finding below was made.
+
+A backup you have not restored is a hope. The routine that makes it a control:
+
+1. Run it on a schedule (cron or a systemd timer) and **copy it off the host**, together with the configuration archive, to storage the GitLab host cannot delete
+2. Alert when the newest archive is older than your target, or smaller than expected
+3. **Restore one regularly** on a spare instance of the same version and run the checks in the next section
+
+### Restoring 🟢 Free
+
+[Docs: restore](https://docs.gitlab.com/19.5/administration/backup_restore/restore_gitlab/)
+
+A restore **overwrites** the data of the instance you run it on. Do it on a prepared instance, never on a healthy production system "to test".
+
+Prerequisites: a fresh installation of the **exact same version and edition** (CE or EE) as the archive, `gitlab-ctl reconfigure` run at least once, and GitLab running. Copy the **secrets file** (`gitlab-secrets.json`) over from the original installation and run `gitlab-ctl reconfigure` again. Put the archive into the backup directory, owned by the `git` user.
+
+```shell
+sudo cp <archive> /var/opt/gitlab/backups/ && sudo chown git:git /var/opt/gitlab/backups/<archive>
+sudo gitlab-ctl stop puma
+sudo gitlab-ctl stop sidekiq
+sudo gitlab-backup restore BACKUP=<timestamp>_<date>_<version>   # the archive name without "_gitlab_backup.tar"
+sudo gitlab-ctl reconfigure
+sudo gitlab-ctl start
+```
+
+In a container, run each command with `docker exec -it <container>` and restart the container at the end. Then verify, and write the results into the runbook:
+
+```shell
+sudo gitlab-rake gitlab:check SANITIZE=true
+sudo gitlab-rake gitlab:doctor:secrets      # encrypted values can be decrypted with the restored secrets
+sudo gitlab-rake gitlab:artifacts:check
+sudo gitlab-rake gitlab:lfs:check
+sudo gitlab-rake gitlab:uploads:check
+```
+
+Then the checks a person makes: sign in, open a project, clone and push, push an image to the registry, run a pipeline on a runner. **Not run on the lab:** a restore replaces the data of the only instance, so the procedure above is from the documentation.
+
+### Upgrades 🟢 Free
+
+[Docs: plan your upgrade](https://docs.gitlab.com/19.5/update/plan_your_upgrade/) · [Upgrade paths](https://docs.gitlab.com/19.5/update/upgrade_paths/) · [Linux package](https://docs.gitlab.com/19.5/update/package/) · [Docker](https://docs.gitlab.com/19.5/update/docker/) · [Background migrations](https://docs.gitlab.com/19.5/update/background_migrations/)
+
+**You cannot jump to any version.** The upgrade path has **required upgrade stops**: you upgrade to the stop after your current version, wait for the background migrations to finish, then go to the next. Since 17.5 the stops fall on `x.2`, `x.5`, `x.8` and `x.11`, so for GitLab 19 they are **19.2, 19.5, 19.8 and 19.11**. The [upgrade path tool](https://gitlab-com.gitlab.io/support/toolbox/upgrade-path/) computes the route from your version to your target, and the upgrade notes for each version list what to know.
+
+The order that the documentation gives, for a single-node instance:
+
+1. **Plan.** Read the notes for every version on the path. Make a **rollback plan** (a backup, or a snapshot of the VM) and know how long the restore takes
+2. **Back up.** A fresh `gitlab-backup create` and `gitlab-ctl backup-etc`, copied off the host. The package also backs up the database before installing a new version, and `touch /etc/gitlab/skip-auto-backup` turns that off. The documentation still says to keep your own full backup
+3. **Run the health checks before you start**: `gitlab:check`, the background migration status, `gitlab:doctor:secrets`
+4. **Maintenance mode** 🟣 Premium, if you want one: Git reads keep working and writes fail with a clear message ([Docs](https://docs.gitlab.com/19.5/administration/maintenance_mode/))
+5. **Pause CI/CD.** Pause the runners and block new jobs with `nginx['custom_gitlab_server_config'] = "location = /api/v4/jobs/request {\n deny all;\n return 503;\n}\n"` plus `gitlab-ctl reconfigure`, then wait for running jobs to end. Without this, job traces fail during the upgrade
+6. **Upgrade GitLab Runner** to the same version as the GitLab target
+7. **Upgrade GitLab.** Linux package: `sudo apt install gitlab-ee` (or your package manager) for the chosen version. Docker: take a backup, stop and remove the container, pull the new image tag, and create the container again **with the same options and volumes**
+8. **Wait for the background migrations**, then run the health checks again. Unpause the runners, revert the job block, and leave maintenance mode
+
+```shell
+sudo gitlab-rake gitlab:background_migrations:list    # 18.9 and later; "status" in older versions
+sudo gitlab-rake gitlab:background_migrations:wait    # blocks until all are finished (new in 19.5)
+```
+
+**Observed on the lab:** 19.5.3-ee has `background_migrations:list`, `status`, `show`, `pause`, `resume`, `execute` and `wait`. **Not run on the lab:** an upgrade. The lab pins the image tag in Terraform and upgrades by changing it (see [`infrastructure/README.md`](infrastructure/README.md)); the stops above still apply.
+
+If the upgrade fails, the rollback is a **restore of the backup (or the snapshot) taken before it, onto an instance of the old version** ([Docs: roll back](https://docs.gitlab.com/19.5/update/package/downgrade/)). That is why step 2 is not optional.
+
+### The registry in operation 🟢 Free
+
+[Docs: administer the registry](https://docs.gitlab.com/19.5/administration/packages/container_registry/) · [Metadata database](https://docs.gitlab.com/19.5/administration/packages/container_registry_metadata_database/) · [Troubleshooting](https://docs.gitlab.com/19.5/administration/packages/container_registry_troubleshooting/)
+
+The registry is its own service, and **GitLab decides who may use it**: a client asks `https://<gitlab>/jwt/auth` for a short-lived token and presents it to the registry, which trusts GitLab's signing key. That is why registry problems are so often authentication or certificate problems.
+
+**Observed on the lab:** the generated configuration is `/var/opt/gitlab/registry/config.yml`, with the filesystem driver under `gitlab-rails/shared/registry`, a listener on `127.0.0.1:5000` and the token realm `https://gitlab.maresdemo.com/jwt/auth`. Edit `/etc/gitlab/gitlab.rb` and reconfigure, never that file.
+
+#### The metadata database
+
+From GitLab 19.0 a **new Linux package installation** runs the registry in `prefer` mode: it uses a PostgreSQL metadata database if it can reach one, and refuses to start if it cannot. An **existing** registry with filesystem metadata keeps using it until you import the metadata (`gitlab-ctl registry-database import`). The database brings **online garbage collection** and features that the filesystem metadata cannot support.
+
+**Which backend is active?** Check, do not assume. Any one of these tells you:
+
+- The lockfile in the registry storage root: `docker/registry/lockfiles/database-in-use` or `filesystem-in-use`
+- The registry log, `/var/log/gitlab/registry/current`: *using the metadata database*, or *database prefer mode enabled, but found filesystem metadata: falling back to legacy metadata*
+- The `gitlab-container-registry-database-enabled` header of an authenticated response (it needs a token from `/jwt/auth?service=container_registry`)
+
+**Observed on the lab:** `database-in-use` is present, the log says *using the metadata database* (registry v4.42.0-gitlab), and the registry database holds 2 repositories, 3 manifests and 32 blobs.
+
+The lockfile is what protects you from two sources of truth. These outcomes (from the documentation, for a reachable and empty database) are worth knowing before any restore or migration:
+
+| Lockfile in storage | `database.enabled` | Result |
+| --- | --- | --- |
+| none | `'prefer'` | Registry **adopts the database** and starts with an **empty catalog** (`200 OK`) |
+| `filesystem-in-use` | `'prefer'` | Falls back to the filesystem metadata, complete catalog |
+| `database-in-use` | `false` | Does not start (*registry metadata database in use*) |
+| both | `'prefer'` | Does not start |
+
+The first row is the trap: **with no lockfile and an empty database, a registry in `prefer` mode starts without complaint and serves an empty catalog**, whatever the storage holds. Keep storage, lockfile and database together when you restore.
+
+Schema migrations are the registry's own, and they run separately from GitLab's:
+
+```shell
+sudo gitlab-ctl registry-database migrate status                # all known migrations and when each was applied
+sudo gitlab-ctl registry-database migrate status --up-to-date   # prints only true or false
+sudo gitlab-ctl registry-database migrate up                    # apply, if the upgrade left some pending
+sudo gitlab-ctl registry-database gc-stats                      # online garbage collection queues
+```
+
+`migrate up --skip-post-deployment` applies the regular schema changes first and leaves the post-deployment ones for after the application has started, to shorten the downtime of an upgrade. If the registry reports *There are pending migrations*, start with `migrate status`. **Observed on the lab:** `migrate status` lists the applied migrations and `gc-stats` shows every review queue at 0.
+
+#### Storage and garbage collection
+
+- **Deleting a tag frees nothing by itself.** The layers are freed by garbage collection
+- **With the database, garbage collection is continuous and online**: untagged manifests and unreferenced layers older than **24 hours** are removed in the background, with no downtime. `gitlab-ctl registry-garbage-collect` is the *offline* tool for the filesystem metadata: it stops the registry, and it **refuses to run when the database is in use**. Do not schedule it on a database registry
+- **Cleanup policies** (Chapter 5) decide *which tags* may go; garbage collection then removes what nothing references. You need both. [Docs](https://docs.gitlab.com/19.5/user/packages/container_registry/reduce_container_registry_storage/)
+- With **object storage**, the registry data is in the bucket: back it up with the provider's tools (see above). Since 19.0 the driver names `s3` and `s3aws` are aliases of `s3_v2`, which can change the presigned download URL to a regional host name. If a proxy allows only `s3.amazonaws.com`, pulls then fail with `403 Forbidden` from the proxy, not from the registry
+
+#### The registry database and backups
+
+[Docs: Linux package backup credentials](https://docs.gitlab.com/omnibus/settings/backups/#container-registry-metadata-database-backup-credentials)
+
+With the metadata database, a registry backup is **two parts that must match**: the storage (local files, or the bucket) and the database. Take them as close together in time as you can, and restore both. Image data without its metadata cannot be listed, and metadata without its data cannot be pulled.
+
+**The documentation is not consistent about this, so test it.** The registry page says that from GitLab **18.10** `gitlab-backup create` and `restore` include the registry database "automatically" once it is configured, and that "no additional configuration is required". The same section then says that the backup task switches the database backup on **only when it finds credentials** (`REGISTRY_DATABASE_PASSWORD`, or an SSL certificate, key or root certificate, in the environment) and that **without credentials the database is not included**. The Linux package page (documented from 18.11) asks you to create credentials in `gitlab.rb`:
+
+```ruby
+# /etc/gitlab/gitlab.rb - then: sudo gitlab-ctl reconfigure
+gitlab_rails['backup_role'] = true
+gitlab_rails['backup_registry_user']      = 'registry_backup'     # default
+gitlab_rails['backup_registry_password']  = '<backup password>'
+gitlab_rails['restore_registry_user']     = 'registry_restore'    # default
+gitlab_rails['restore_registry_password'] = '<restore password>'
+```
+
+The other documented way is to dump the database yourself with `pg_dump` and restore it with `pg_restore`.
+
+> [!WARNING]
+> **Found on the lab.** The registry runs on its database and the lab sets no backup credentials. The result: `registry.tar.gz` (the files, 53 MB) is in the archive and **no registry database dump** is. The backup log (`/var/log/gitlab/gitlab-rails/backup_json.log`) lists `Dumping PostgreSQL database gitlabhq_production` and `Dumping container registry images`, has **no step and no "skipped" message for the registry database**, and the run ended with only the warning about `gitlab.rb` and `gitlab-secrets.json`. Restoring that archive would give you layers without a catalog. The credentials above are what the documentation prescribes; **they were not applied or tested on the lab**, and the page does not say here how the `registry_backup` and `registry_restore` PostgreSQL roles are created, so read it before you rely on it. Until you have tested it, add a `pg_dump` of the `registry` database to your own backup, and look inside every archive with `tar -tf`.
+
+#### When it breaks
+
+| Symptom | Likely cause and what to do |
+| --- | --- |
+| `docker login` fails with 401 and the registry log says *token signed by untrusted key* | The certificate and the key of the pair that signs registry tokens do not match. Compare `rootcertbundle` in `/var/opt/gitlab/registry/config.yml` with the key in `gitlab.yml` (the troubleshooting page shows both) |
+| `x509: certificate signed by unknown authority` in a job | The Docker daemon does not trust the certificate (typically a self-signed one). Configure Docker to trust it, see the [registry page](https://docs.gitlab.com/19.5/administration/packages/container_registry/#configure-self-signed-certificates) |
+| Logins fail for no visible reason | The first thing the troubleshooting page asks you to check: the clocks of the Docker client and the GitLab server are synchronised (NTP) |
+| Push fails with `MANIFEST_BLOB_UNKNOWN` / *blob unknown to registry* | **Observed on the lab:** Docker 29 pushes attestation manifests that the 19.5 registry rejects in database mode. Build with `BUILDX_NO_DEFAULT_ATTESTATIONS=1`, which the course's CI examples set (Chapter 7) |
+| Registry will not start after an upgrade | `gitlab-ctl registry-database migrate status --up-to-date`, then `migrate up`; read `gitlab-ctl tail registry` |
+| Pulls fail with 403 after the upgrade to 19.0, S3 storage | A proxy blocks the new regional download host name (see above) |
+| Deleted images, but the disk did not shrink | Tags go at once; layers go after garbage collection. Look at `gc-stats` |
+
+### Operating routine
+
+A schedule is the difference between "we have backups" and "we operate GitLab". This one is a suggestion built from the chapter, not a documented procedure; adapt it to your risk:
+
+| When | Do | Evidence |
+| --- | --- | --- |
+| Every day | Backup runs and is copied off the host; `gitlab-ctl status` and `/-/readiness?all=1` are green; disk has room | Backup job log and monitoring |
+| Every week | Read the failed jobs of Sidekiq and the `registry/current` errors; check the registry `gc-stats` | A ticket or a note |
+| Every month | Install the patch release of your minor version; update the runners to match; review administrators and tokens (Chapter 9) | Change record |
+| Every quarter | **Restore a backup on a spare instance** and run the checks; plan the next required upgrade stop | Restore log with timings |
+| Before every upgrade | The eight steps above, with the rollback plan written down | The runbook, signed off |
+| After every restore or version change | `gitlab:check`, `doctor:secrets`, a registry push and pull, a pipeline run | The checklist |
+
+### Tier reference for this chapter
+
+| Capability | Tier |
+| --- | --- |
+| Backup and restore, health checks, logs, Prometheus, upgrades, registry administration, metadata database, cleanup policies | 🟢 Free |
+| Maintenance mode | 🟣 Premium |
+
+### Hands-on: back up, inspect and rehearse
+
+About 60 to 90 minutes on a **sandbox** instance of the same version as production (the trainer's, or a copy). Do not run steps 3 and 4 on a system anyone depends on.
+
+1. **Read the state** (10 min). Run the everyday checks. Write down the version, the services, the free disk space, and the answer to "is the registry on the database or on the filesystem?" from the lockfile and from the log
+2. **Take both backups and open them** (15 min). `gitlab-backup create` and `gitlab-ctl backup-etc`. List each archive with `tar -tf`. Fill in the table at the start of this chapter for your instance: which row is in which archive? Which rows are in none?
+3. **Close the gap** (20 min). Pick the largest gap from step 2 (for the lab it is the registry database) and decide how you will back it up, who copies it off the host, and how you will notice when it stops. Apply it on the sandbox and take the backup again
+4. **Restore on a second instance** (30 min). Build a fresh instance of the **same version and edition**, restore the secrets first, then the archive, and run the verification commands. Push and pull an image. What is missing? What took longest?
+5. **Write the upgrade plan** (15 min). With the [upgrade path tool](https://gitlab-com.gitlab.io/support/toolbox/upgrade-path/), compute the route from your version to the newest. Which required stops are on it? How long would the instance be unavailable, and who decides when?
+
+#### Questions to discuss
+
+- When did you last restore a backup, and how long did it take? What would you do if the secrets file were lost?
+- Who is alerted when the backup stops, and how long before somebody notices today?
+- A developer deletes 200 image tags to "free space" and the disk does not shrink. What do you tell them, and what do you check?
+- Which upgrade stops lie between your version and the current one, and who owns the plan?
+
+---
+
 ## Appendix A: Git cheat sheet
 
 Plain Git, no tier needed. The scenarios to practise on are in [`examples/git-exercises/`](examples/git-exercises/).
@@ -2859,7 +3139,7 @@ Which GitLab tier each feature in this course needs.
 
 - **Free**: available in all tiers. **Premium**: Premium **and** Ultimate. **Ultimate**: Ultimate only
 - On GitLab.com and on self-managed GitLab the tier of a feature is the same unless a row says otherwise. Self-managed EE without a licence behaves as Free; an Ultimate trial unlocks everything for 30 days
-- **Version: GitLab 19.5.** The chapters 1 to 8 were checked on 2026-11-08, the governance rows on 2026-11-09. Method: the `Tier:` lines (page and sections) of about 150 pages of the raw documentation of the `19-5-stable-ee` branch, read page by page; for features in the product's licensed-feature lists the two sources were also compared and agreed. Where a page has one tier for the page and a higher tier for a section, both are listed
+- **Version: GitLab 19.5.** The chapters 1 to 8 were checked on 2026-11-08, the governance rows on 2026-11-09, the operations chapter on 2026-11-10. Method: the `Tier:` lines (page and sections) of about 150 pages of the raw documentation of the `19-5-stable-ee` branch, read page by page; for features in the product's licensed-feature lists the two sources were also compared and agreed. Where a page has one tier for the page and a higher tier for a section, both are listed
 - **Tiers change between releases.** Open the page on docs.gitlab.com for your version: the tier is the first thing under the title
 - **"Not stated"** means the page has no `Tier:` line (it lists only the offering). That is **not** evidence that the feature is Free: check it in your own tier before relying on it
 
